@@ -1,12 +1,31 @@
 import { create } from 'zustand';
-import type { IconMeta, IconItem, Project, SpriteConfig } from '../types';
+import type {
+  IconMeta,
+  IconItem,
+  Project,
+  SpriteConfig,
+  IconVersion,
+  IconVersionWithData,
+  VersionDiffResult,
+  VersionChangeType,
+} from '../types';
 import { generateId, iconItemToMeta } from '../utils';
 import {
   saveIconDataUrl,
   getIconDataUrl,
   deleteIconBlob,
   deleteIconBulk,
+  saveContentBlob,
+  getContentBlobDataUrl,
+  saveIconVersion,
+  getIconVersions,
+  getLatestVersion,
+  getNextVersionNumber,
+  getIconVersion,
+  deleteIconVersions as dbDeleteIconVersions,
+  dataUrlToBlob,
 } from '../utils/db';
+import { computeDataUrlHash, computeImageDiff } from '../utils/version';
 
 const STORAGE_KEY = 'css-sprite-tool-data';
 
@@ -63,6 +82,22 @@ interface AppState {
     failed: number;
   }>;
   getIconItem: (meta: IconMeta) => Promise<IconItem | null>;
+
+  createIconVersion: (
+    iconId: string,
+    dataUrl: string,
+    changeType: VersionChangeType,
+    changeNote?: string
+  ) => Promise<IconVersion | null>;
+  getIconVersionList: (iconId: string) => Promise<IconVersion[]>;
+  getIconVersionWithData: (versionId: string) => Promise<IconVersionWithData | null>;
+  rollbackToVersion: (iconId: string, versionId: string) => Promise<IconItem | null>;
+  updateIconData: (iconId: string, dataUrl: string, name?: string) => Promise<IconItem | null>;
+  diffVersions: (
+    versionIdA: string,
+    versionIdB: string
+  ) => Promise<VersionDiffResult | null>;
+  renameIcon: (iconId: string, name: string) => void;
 }
 
 function loadFromStorage(): PersistedData {
@@ -135,6 +170,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   removeIcon: async (id) => {
     try {
       await deleteIconBlob(id);
+      await dbDeleteIconVersions(id);
     } catch (e) {
       toastHandlers.showError('删除图片数据失败');
     }
@@ -288,6 +324,163 @@ export const useAppStore = create<AppState>((set, get) => ({
       toastHandlers.showWarning(`成功加载 ${items.length} 个图标，${failed} 个加载失败`);
     }
     return { items, total: metas.length, loaded: items.length, failed };
+  },
+
+  renameIcon: (iconId, name) => {
+    set((state) => {
+      const newIcons = state.icons.map((i) =>
+        i.id === iconId ? { ...i, name } : i
+      );
+      saveToStorage(state.projects, newIcons);
+      return { icons: newIcons };
+    });
+  },
+
+  createIconVersion: async (iconId, dataUrl, changeType, changeNote) => {
+    const state = get();
+    const meta = state.icons.find((i) => i.id === iconId);
+    if (!meta) {
+      toastHandlers.showError('图标不存在');
+      return null;
+    }
+
+    try {
+      const contentHash = await computeDataUrlHash(dataUrl);
+      const latest = await getLatestVersion(iconId);
+
+      if (latest && latest.contentHash === contentHash) {
+        toastHandlers.showInfo('内容未发生变化，未创建新版本');
+        return latest;
+      }
+
+      const blob = await dataUrlToBlob(dataUrl);
+      await saveContentBlob(contentHash, blob);
+
+      const versionNum = await getNextVersionNumber(iconId);
+      const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve({ width: img.width, height: img.height });
+        img.onerror = reject;
+        img.src = dataUrl;
+      });
+
+      const version: IconVersion = {
+        id: generateId(),
+        iconId,
+        version: versionNum,
+        contentHash,
+        name: meta.name,
+        width: size.width,
+        height: size.height,
+        changeType,
+        changeNote,
+        createdAt: Date.now(),
+        parentVersionId: latest?.id,
+      };
+
+      await saveIconVersion(version);
+      toastHandlers.showSuccess(`已保存版本 v${versionNum}`);
+      return version;
+    } catch {
+      toastHandlers.showError('创建版本失败');
+      return null;
+    }
+  },
+
+  getIconVersionList: async (iconId) => {
+    try {
+      return await getIconVersions(iconId);
+    } catch {
+      toastHandlers.showError('加载版本列表失败');
+      return [];
+    }
+  },
+
+  getIconVersionWithData: async (versionId) => {
+    try {
+      const version = await getIconVersion(versionId);
+      if (!version) return null;
+      const dataUrl = await getContentBlobDataUrl(version.contentHash);
+      if (!dataUrl) return null;
+      return { ...version, dataUrl };
+    } catch {
+      toastHandlers.showError('加载版本数据失败');
+      return null;
+    }
+  },
+
+  updateIconData: async (iconId, dataUrl, name) => {
+    const state = get();
+    const meta = state.icons.find((i) => i.id === iconId);
+    if (!meta) {
+      toastHandlers.showError('图标不存在');
+      return null;
+    }
+
+    try {
+      await saveIconDataUrl(iconId, dataUrl);
+
+      const size = await new Promise<{ width: number; height: number }>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => resolve({ width: img.width, height: img.height });
+        img.onerror = reject;
+        img.src = dataUrl;
+      });
+
+      const finalName = name || meta.name;
+      set((s) => {
+        const newIcons = s.icons.map((i) =>
+          i.id === iconId
+            ? { ...i, name: finalName, width: size.width, height: size.height }
+            : i
+        );
+        saveToStorage(s.projects, newIcons);
+        return { icons: newIcons };
+      });
+
+      return {
+        ...meta,
+        name: finalName,
+        width: size.width,
+        height: size.height,
+        dataUrl,
+      };
+    } catch {
+      toastHandlers.showError('更新图标失败');
+      return null;
+    }
+  },
+
+  rollbackToVersion: async (iconId, versionId) => {
+    const versionData = await get().getIconVersionWithData(versionId);
+    if (!versionData) {
+      toastHandlers.showError('目标版本不存在或数据丢失');
+      return null;
+    }
+
+    const updated = await get().updateIconData(iconId, versionData.dataUrl, versionData.name);
+    if (!updated) return null;
+
+    await get().createIconVersion(iconId, versionData.dataUrl, 'rollback', `回滚到 v${versionData.version}`);
+    toastHandlers.showSuccess(`已回滚到版本 v${versionData.version}`);
+    return updated;
+  },
+
+  diffVersions: async (versionIdA, versionIdB) => {
+    const [va, vb] = await Promise.all([
+      get().getIconVersionWithData(versionIdA),
+      get().getIconVersionWithData(versionIdB),
+    ]);
+    if (!va || !vb) {
+      toastHandlers.showError('版本数据加载失败');
+      return null;
+    }
+    try {
+      return await computeImageDiff(va.dataUrl, vb.dataUrl, va, vb);
+    } catch {
+      toastHandlers.showError('对比计算失败');
+      return null;
+    }
   },
 }));
 

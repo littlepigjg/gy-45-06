@@ -17,11 +17,14 @@ import {
   AlertCircle,
   RefreshCw,
   AlertTriangle,
+  Eye,
+  Info,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { useAppStore } from '@/store/useAppStore';
 import { createIconItemsFromFiles, formatDate, cn } from '@/utils';
 import { useToast } from '@/components/Toast';
+import IconDetailModal from '@/components/library/IconDetailModal';
 import type { IconItem, Project } from '@/types';
 
 export default function Library() {
@@ -40,6 +43,7 @@ export default function Library() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [loadStats, setLoadStats] = useState<{ total: number; loaded: number; failed: number } | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
+  const [detailIcon, setDetailIcon] = useState<IconItem | null>(null);
 
   const {
     projects,
@@ -310,10 +314,20 @@ export default function Library() {
             )}
           >
             {selectedIconIds.has(icon.id) && (
-              <div className="absolute top-2 left-2 z-10 w-5 h-5 rounded bg-neon-cyan flex items-center justify-center">
+              <div className="absolute bottom-2 left-2 z-10 w-5 h-5 rounded bg-neon-cyan flex items-center justify-center">
                 <Check className="w-3 h-3 text-ink-950" />
               </div>
             )}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                setDetailIcon(icon);
+              }}
+              className="absolute top-2 left-2 z-10 w-5 h-5 rounded bg-ink-900/80 opacity-0 group-hover:opacity-100 hover:bg-neon-cyan hover:text-ink-950 transition-all flex items-center justify-center text-slate-300"
+              title="查看详情 / 版本历史"
+            >
+              <Eye className="w-3 h-3" />
+            </button>
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -325,7 +339,13 @@ export default function Library() {
             >
               <X className="w-3 h-3 text-white" />
             </button>
-            <div className="aspect-square checkerboard p-3 flex items-center justify-center">
+            <div
+              className="aspect-square checkerboard p-3 flex items-center justify-center"
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setDetailIcon(icon);
+              }}
+            >
               <img
                 src={icon.dataUrl}
                 alt={icon.name}
@@ -590,9 +610,20 @@ export default function Library() {
       {contextMenu && (
         <div
           onClick={(e) => e.stopPropagation()}
-          className="fixed z-50 card py-1 min-w-[160px] shadow-xl"
+          className="fixed z-50 card py-1 min-w-[180px] shadow-xl"
           style={{ left: contextMenu.x, top: contextMenu.y }}
         >
+          <button
+            onClick={() => {
+              setDetailIcon(contextMenu.icon);
+              setContextMenu(null);
+            }}
+            className="w-full px-3 py-2 text-left text-xs text-slate-300 hover:bg-white/5 flex items-center gap-2"
+          >
+            <Info className="w-3.5 h-3.5 text-neon-cyan" />
+            查看详情 / 版本历史
+          </button>
+          <div className="h-px bg-ink-700 my-1" />
           <button
             onClick={() => {
               navigator.clipboard.writeText(contextMenu.icon.name);
@@ -615,6 +646,18 @@ export default function Library() {
             删除图标
           </button>
         </div>
+      )}
+
+      {detailIcon && (
+        <IconDetailModal
+          icon={detailIcon}
+          onClose={() => setDetailIcon(null)}
+          onUpdated={(updated) => {
+            setProjectIcons((prev) =>
+              prev.map((i) => (i.id === updated.id ? updated : i))
+            );
+          }}
+        />
       )}
     </div>
   );
